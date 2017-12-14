@@ -247,10 +247,23 @@ export default class PlaylistLoader extends EventTarget {
     this.state = 'HAVE_METADATA';
 
     const parser = new m3u8.Parser();
+    parser.addParser(/^#ZEN-TOTAL-DURATION/, 'zenTotalDuration',
+      (line) => (line.split(':')[1]));
+    parser.addParser(/^#ZEN-AVERAGE-BANDWIDTH/, 'zenAvgBandwidth',
+      (line) => (line.split(':')[1]));
+    parser.addParser(/^#ZEN-MAXIMUM-BANDWIDTH/, 'zenMaxBandwidth',
+      (line) => (line.split(':')[1]));
 
     parser.push(xhr.responseText);
     parser.end();
     parser.manifest.uri = url;
+
+    if(parser.manifest.custom != undefined){
+      this.totalDuration = parser.manifest.custom.zenTotalDuration;
+      this.avgBandwith = parser.manifest.custom.zenAvgBandwidth;
+      this.maxBandwidth = parser.manifest.custom.zenMaxBandwidth;
+    }
+    
     // m3u8-parser does not attach an attributes property to media playlists so make
     // sure that the property is attached to avoid undefined reference errors
     parser.manifest.attributes = parser.manifest.attributes || {};
