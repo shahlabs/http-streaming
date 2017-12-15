@@ -10,6 +10,7 @@ import Playlist from './playlist';
 import xhrFactory from './xhr';
 import {Decrypter, AsyncStream, decrypt} from 'aes-decrypter';
 import utils from './bin-utils';
+import {timeRangesToArray} from './ranges';
 import {MediaSource, URL} from 'videojs-contrib-media-sources';
 import m3u8 from 'm3u8-parser';
 import videojs from 'video.js';
@@ -73,22 +74,6 @@ const INITIAL_BANDWIDTH = 4194304;
   });
 });
 
-export const simpleTypeFromSourceType = (type) => {
-  const mpegurlRE = /^(audio|video|application)\/(x-|vnd\.apple\.)?mpegurl/i;
-
-  if (mpegurlRE.test(type)) {
-    return 'hls';
-  }
-
-  const dashRE = /^application\/dash\+xml/i;
-
-  if (dashRE.test(type)) {
-    return 'dash';
-  }
-
-  return null;
-};
-
 /**
  * Updates the selectedIndex of the QualityLevelList when a mediachange happens in hls.
  *
@@ -135,46 +120,6 @@ Hls.canPlaySource = function() {
                           'your player\'s techOrder.');
 };
 
-const emeOptions = (keySystemOptions, videoPlaylist, audioPlaylist) => {
-  if (!keySystemOptions) {
-    return keySystemOptions;
-  }
-
-  // upsert the content types based on the selected playlist
-  const keySystemContentTypes = {};
-
-  for (let keySystem in keySystemOptions) {
-    keySystemContentTypes[keySystem] = {
-      audioContentType: `audio/mp4; codecs="${audioPlaylist.attributes.CODECS}"`,
-      videoContentType: `video/mp4; codecs="${videoPlaylist.attributes.CODECS}"`
-    };
-
-    // videojs-contrib-eme accepts the option of specifying: 'com.some.cdm': 'url'
-    // so we need to prevent overwriting the URL entirely
-    if (typeof keySystemOptions[keySystem] === 'string') {
-      keySystemContentTypes[keySystem].url = keySystemOptions[keySystem];
-    }
-  }
-
-  return {
-    keySystems: videojs.mergeOptions(keySystemOptions, keySystemContentTypes)
-  };
-};
-
-const setupEmeOptions = (hlsHandler) => {
-  if (hlsHandler.options_.sourceType === 'dash') {
-    const player = videojs.players[hlsHandler.tech_.options_.playerId];
-
-    if (player.eme) {
-      player.eme.options = emeOptions(
-        hlsHandler.source_.keySystems,
-        hlsHandler.playlists.media(),
-        hlsHandler.masterPlaylistController_.mediaTypes_.AUDIO.activePlaylistLoader.media()
-      );
-    }
-  }
-};
-
 /**
  * Whether the browser has built-in HLS support.
  */
@@ -205,15 +150,6 @@ Hls.supportsNativeHls = (function() {
   return canPlay.some(function(canItPlay) {
     return (/maybe|probably/i).test(video.canPlayType(canItPlay));
   });
-}());
-
-Hls.supportsNativeDash = (function() {
-  if (!videojs.getTech('Html5').isSupported()) {
-    return false;
-  }
-
-  return (/maybe|probably/i).test(
-    document.createElement('video').canPlayType('application/dash+xml'));
 }());
 
 /**
@@ -255,15 +191,6 @@ class HlsHandler extends Component {
           }
         });
       }
-
-      // Set up a reference to the HlsHandler from player.vhs. This allows users to start
-      // migrating from player.tech_.hls... to player.vhs... for API access. Although this
-      // isn't the most appropriate form of reference for video.js (since all APIs should
-      // be provided through core video.js), it is a common pattern for plugins, and vhs
-      // will act accordingly.
-      _player.vhs = this;
-      // deprecated, for backwards compatibility
-      _player.dash = this;
     }
 
     this.tech_ = tech;
@@ -347,7 +274,7 @@ class HlsHandler extends Component {
    *
    * @param {Object} src the source object to handle
    */
-  src(src, type) {
+  src(src) {
     // do nothing if the src is falsey
     if (!src) {
       return;
@@ -357,7 +284,6 @@ class HlsHandler extends Component {
     this.options_.url = this.source_.src;
     this.options_.tech = this.tech_;
     this.options_.externHls = Hls;
-    this.options_.sourceType = simpleTypeFromSourceType(type);
 
     this.masterPlaylistController_ = new MasterPlaylistController(this.options_);
     this.playbackWatcher_ = new PlaybackWatcher(
@@ -484,6 +410,46 @@ class HlsHandler extends Component {
       mediaSecondsLoaded: {
         get: () => this.masterPlaylistController_.mediaSecondsLoaded_() || 0,
         enumerable: true
+      },
+      buffered: {
+        get: () => timeRangesToArray(this.tech_.buffered()),
+        enumerable: true
+      },
+      currentTime: {
+        get: () => this.tech_.currentTime(),
+        enumerable: true
+      },
+      currentSource: {
+        get: () => this.tech_.currentSource_,
+        enumerable: true
+      },
+      currentTech: {
+        get: () => this.tech_.name_,
+        enumerable: true
+      },
+      duration: {
+        get: () => this.tech_.duration(),
+        enumerable: true
+      },
+      master: {
+        get: () => this.playlists.master,
+        enumerable: true
+      },
+      playerDimensions: {
+        get: () => this.tech_.currentDimensions(),
+        enumerable: true
+      },
+      seekable: {
+        get: () => timeRangesToArray(this.tech_.seekable()),
+        enumerable: true
+      },
+      timestamp: {
+        get: () => Date.now(),
+        enumerable: true
+      },
+      videoPlaybackQuality: {
+        get: () => this.tech_.getVideoPlaybackQuality(),
+        enumerable: true
       }
     });
 
@@ -493,7 +459,6 @@ class HlsHandler extends Component {
     this.masterPlaylistController_.on('selectedinitialmedia', () => {
       // Add the manual rendition mix-in to HlsHandler
       renditionSelectionMixin(this);
-      setupEmeOptions(this);
     });
 
     // the bandwidth of the primary segment loader is our best
@@ -622,7 +587,7 @@ const HlsSourceHandler = function(mode) {
       tech.hls = new HlsHandler(source, tech, localOptions);
       tech.hls.xhr = xhrFactory();
 
-      tech.hls.src(source.src, source.type);
+      tech.hls.src(source.src);
       return tech.hls;
     },
     canPlayType(type, options = {}) {
@@ -642,21 +607,13 @@ HlsSourceHandler.canPlayType = function(type, options) {
     return false;
   }
 
-  const sourceType = simpleTypeFromSourceType(type);
-
-  if (sourceType === 'dash') {
-    if (!options.hls.overrideNative && Hls.supportsNativeDash) {
-      return false;
-    }
-    return true;
-  }
+  let mpegurlRE = /^(audio|video|application)\/(x-|vnd\.apple\.)?mpegurl/i;
 
   // favor native HLS support if it's available
   if (!options.hls.overrideNative && Hls.supportsNativeHls) {
     return false;
   }
-
-  return sourceType === 'hls';
+  return mpegurlRE.test(type);
 };
 
 if (typeof videojs.MediaSource === 'undefined' ||
@@ -690,44 +647,8 @@ if (videojs.registerPlugin) {
   videojs.plugin('reloadSourceOnError', reloadSourceOnError);
 }
 
-const getTimeRanges = (player, type) => {
-  const timeRangesList = [];
-  const timeRanges = player[type]();
-
-  for (let i = 0; i < timeRanges.length; i++) {
-    timeRangesList.push({
-      start: timeRanges.start(i),
-      end: timeRanges.end(i)
-    });
-  }
-
-  return timeRangesList;
-};
-
-videojs.registerPlugin('stats', function() {
-  const player = this;
-
-  return {
-    videoPlaybackQuality: player.getVideoPlaybackQuality(),
-    playerDimensions: player.currentDimensions(),
-    hlsStats: player.tech_.hls.stats,
-    duration: player.duration(),
-    buffered: getTimeRanges(player, 'buffered'),
-    seekable: getTimeRanges(player, 'seekable'),
-    currentTime: player.currentTime(),
-    timestamp: Date.now(),
-    currentSource: player.currentSource(),
-    master: player.tech_.hls.masterPlaylistController_.masterPlaylistLoader_.master,
-    currentTech: player.tech_.name_,
-    // TODO: filter by VHS logging only
-    history: videojs.log.history()
-  };
-});
-
 module.exports = {
   Hls,
   HlsHandler,
-  HlsSourceHandler,
-  emeOptions,
-  simpleTypeFromSourceType
+  HlsSourceHandler
 };
